@@ -1,0 +1,119 @@
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from pydantic import BaseModel
+import uvicorn
+
+app = FastAPI()
+
+# In-memory "database"
+users = {}
+banned_ips = set()
+banned_usernames = set()
+active_connections = set()
+
+class User(BaseModel):
+    username: str
+    password: str
+    language: str = "en"
+    gradient: str = "#ff00ff,#00ffff"
+    premium: bool = False
+    banner_url: str = ""
+    banner_animated: bool = False
+
+@app.post("/register")
+def register(user: User):
+    if user.username in users:
+        raise HTTPException(status_code=400, detail="Username exists")
+    users[user.username] = user
+    return {"msg": "Registered"}
+
+@app.post("/login")
+def login(user: User):
+    if user.username not in users or users[user.username].password != user.password:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    return {"token": "dummy-jwt", "premium": users[user.username].premium}
+
+@app.post("/profile/set_gradient")
+def set_gradient(username: str, gradient: str):
+    if username in users:
+        users[username].gradient = gradient
+        return {"msg": "Gradient updated"}
+    raise HTTPException(status_code=404, detail="User not found")
+
+@app.post("/profile/set_language")
+def set_language(username: str, language: str):
+    if username in users:
+        users[username].language = language
+        return {"msg": "Language updated"}
+    raise HTTPException(status_code=404, detail="User not found")
+
+@app.post("/profile/set_banner")
+def set_banner(username: str, banner_url: str, animated: bool = False):
+    if username in users:
+        users[username].banner_url = banner_url
+        users[username].banner_animated = animated
+        return {"msg": "Banner updated"}
+    raise HTTPException(status_code=404, detail="User not found")
+
+@app.get("/profile/{username}")
+def get_profile(username: str):
+    if username in users:
+        user = users[username]
+        return user
+    raise HTTPException(status_code=404, detail="User not found")
+
+@app.post("/premium/upgrade")
+def upgrade_premium(username: str):
+    if username in users:
+        users[username].premium = True
+        return {"msg": "Premium upgraded"}
+    raise HTTPException(status_code=404, detail="User not found")
+
+@app.post("/ban/user")
+def ban_user(username: str):
+    banned_usernames.add(username)
+    return {"msg": f"{username} banned"}
+
+@app.post("/unban/user")
+def unban_user(username: str):
+    banned_usernames.discard(username)
+    return {"msg": f"{username} unbanned"}
+
+@app.post("/ban/ip")
+def ban_ip(ip: str):
+    banned_ips.add(ip)
+    return {"msg": f"{ip} banned"}
+
+@app.post("/unban/ip")
+def unban_ip(ip: str):
+    banned_ips.discard(ip)
+    return {"msg": f"{ip} unbanned"}
+
+def is_nsfw(text):
+    nsfw_keywords = ["badword", "nsfw", "sex"]
+    return any(word in text.lower() for word in nsfw_keywords)
+
+@app.websocket("/ws/chat")
+async def websocket_endpoint(websocket: WebSocket):
+    ip = websocket.client.host
+    await websocket.accept()
+    active_connections.add(websocket)
+    try:
+        while True:
+            data = await websocket.receive_json()
+            sender = data.get("sender")
+            content = data.get("content")
+            if ip in banned_ips or sender in banned_usernames:
+                await websocket.send_json({"error": "You are banned."})
+                await websocket.close()
+                active_connections.remove(websocket)
+                return
+            if is_nsfw(content):
+                await websocket.send_json({"error": "NSFW content is not allowed."})
+                continue
+            for conn in active_connections:
+                await conn.send_json({"sender": sender, "content": content})
+    except WebSocketDisconnect:
+        active_connections.remove(websocket)
+
+if __name__ == "__main__":
+    uvicorn.run("main:app", host="0.0.0.0", port=8000)
